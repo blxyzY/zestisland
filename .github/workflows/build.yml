@@ -1,119 +1,27 @@
 name: Build APK
-
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
-    paths-ignore: ["**.md", ".gitignore"]
-  pull_request:
   workflow_dispatch:
-
-# Batalkan build lama kalau ada push baru di branch yang sama
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
-
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: write   # dibutuhkan hanya untuk step Release
-
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
-
-      # Android SDK sudah terpasang di runner ubuntu-latest (ANDROID_HOME), jadi
-      # android-actions/setup-android tidak dipakai (gagal: package 'tools' tidak ada).
-      # Kalau SDK 34 belum ada, AGP mengunduhnya otomatis; lisensi diterima di bawah.
-      - name: Terima lisensi SDK
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-
-      # Cache Gradle (dependency, wrapper, build cache); cache hanya ditulis dari main
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.7
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-
-      # Tanda tangan APK harus sama dengan build lokal sebelumnya, supaya
-      # `pm install -r` bisa menimpa tanpa bentrok. Isi secret DEBUG_KEYSTORE_BASE64
-      # dari HP tempat kamu mem-build sebelumnya:
-      #   base64 -w0 ~/.android/debug.keystore
-      # Kalau secret kosong, dipakai kunci uji AOSP dari UN1CA (publik, konsisten
-      # antar build, tapi TIDAK sama dengan build lokal lama).
-      - name: Siapkan debug keystore
-        env:
-          KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
-          UNICA_SHA: 0c2ea1d61ddc78ae8e6900787f9f9e7269b7b439
-        run: |
-          mkdir -p ~/.android
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
-            echo "Memakai keystore dari secret."
-            exit 0
-          fi
-          echo "::notice::DEBUG_KEYSTORE_BASE64 kosong, memakai kunci uji AOSP UN1CA."
-          B=https://raw.githubusercontent.com/salvogiangri/UN1CA/$UNICA_SHA/security
-          mkdir -p /tmp/k
-          curl -fsSL "$B/aosp_testkey.pk8"      -o /tmp/k/key.pk8
-          curl -fsSL "$B/aosp_testkey.x509.pem" -o /tmp/k/cert.pem
-          openssl pkcs8 -inform DER -nocrypt -in /tmp/k/key.pk8 -out /tmp/k/key.pem
-          openssl pkcs12 -export -inkey /tmp/k/key.pem -in /tmp/k/cert.pem \
-            -name androiddebugkey -out /tmp/k/debug.p12 -passout pass:android
-          rm -f ~/.android/debug.keystore
-          keytool -importkeystore -srckeystore /tmp/k/debug.p12 -srcstoretype PKCS12 \
-            -srcstorepass android -destkeystore ~/.android/debug.keystore \
-            -deststoretype PKCS12 -deststorepass android -alias androiddebugkey -noprompt
-          rm -rf /tmp/k
-
+          gradle-version: "8.7"
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace --console=plain --info
-
-      - name: Siapkan nama APK
-        id: apk
-        run: |
-          NAME="ZestIsland-${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}.apk"
-          cp app/build/outputs/apk/debug/app-debug.apk "$NAME"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Rename
+        run: cp app/build/outputs/apk/debug/app-debug.apk ZestIsland.apk
       - uses: actions/upload-artifact@v4
         with:
           name: ZestIsland-apk
-          path: ${{ steps.apk.outputs.name }}
-          if-no-files-found: error
-          retention-days: 30
-
-      # Kalau build gagal, simpan laporan supaya gampang debug
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: build-reports
-          path: |
-            app/build/reports/
-            app/build/outputs/logs/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Ringkasan
-        run: |
-          {
-            echo "### Build selesai"
-            echo "- File: \`${{ steps.apk.outputs.name }}\`"
-            echo "- Ukuran: $(du -h '${{ steps.apk.outputs.name }}' | cut -f1)"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # Push tag v* (mis. v0.2) otomatis bikin GitHub Release berisi APK
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.apk.outputs.name }}
-          generate_release_notes: true
+          path: ZestIsland.apk

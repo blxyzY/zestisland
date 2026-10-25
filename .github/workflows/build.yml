@@ -33,7 +33,11 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
+      # Android SDK sudah terpasang di runner ubuntu-latest (ANDROID_HOME), jadi
+      # android-actions/setup-android tidak dipakai (gagal: package 'tools' tidak ada).
+      # Kalau SDK 34 belum ada, AGP mengunduhnya otomatis; lisensi diterima di bawah.
+      - name: Terima lisensi SDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       # Cache Gradle (dependency, wrapper, build cache); cache hanya ditulis dari main
       - uses: gradle/actions/setup-gradle@v4

@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Zest Island</string>
+    <string name="a11y_desc">Menampilkan island di sekitar kamera depan (musik, timer, telepon, notifikasi, pengisian).</string>
+</resources>

@@ -43,16 +43,26 @@ jobs:
           gradle-version: 8.7
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      # Tanda tangani APK dengan kunci uji AOSP milik ROM (UN1CA), supaya tanda
-      # tangannya selalu sama di setiap build dan cocok dengan ROM kamu.
-      # Kunci ini publik (ada di repo UN1CA, dipin ke satu commit); AGP memakainya
-      # sebagai debug keystore (alias androiddebugkey, password android).
-      - name: Pakai kunci uji AOSP UN1CA sebagai debug keystore
+      # Tanda tangan APK harus sama dengan build lokal sebelumnya, supaya
+      # `pm install -r` bisa menimpa tanpa bentrok. Isi secret DEBUG_KEYSTORE_BASE64
+      # dari HP tempat kamu mem-build sebelumnya:
+      #   base64 -w0 ~/.android/debug.keystore
+      # Kalau secret kosong, dipakai kunci uji AOSP dari UN1CA (publik, konsisten
+      # antar build, tapi TIDAK sama dengan build lokal lama).
+      - name: Siapkan debug keystore
         env:
+          KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
           UNICA_SHA: 0c2ea1d61ddc78ae8e6900787f9f9e7269b7b439
         run: |
+          mkdir -p ~/.android
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+            echo "Memakai keystore dari secret."
+            exit 0
+          fi
+          echo "::notice::DEBUG_KEYSTORE_BASE64 kosong, memakai kunci uji AOSP UN1CA."
           B=https://raw.githubusercontent.com/salvogiangri/UN1CA/$UNICA_SHA/security
-          mkdir -p ~/.android /tmp/k
+          mkdir -p /tmp/k
           curl -fsSL "$B/aosp_testkey.pk8"      -o /tmp/k/key.pk8
           curl -fsSL "$B/aosp_testkey.x509.pem" -o /tmp/k/cert.pem
           openssl pkcs8 -inform DER -nocrypt -in /tmp/k/key.pk8 -out /tmp/k/key.pem

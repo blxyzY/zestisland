@@ -11,6 +11,9 @@ jobs:
   build:
     name: Build ZestIsland APK
     runs-on: ubuntu-22.04
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Checkout source
@@ -22,13 +25,23 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platform-tools
-            platforms;android-35
-            build-tools;35.0.0
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort | tail -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager tidak ditemukan di $ANDROID_HOME/cmdline-tools"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -36,16 +49,20 @@ jobs:
           gradle-version: "8.7"
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Verify Java and Gradle
+      - name: Verify Java, Android SDK, and Gradle
         run: |
           java -version
           gradle --version
+          test -d "$ANDROID_HOME/platforms/android-35"
+          test -d "$ANDROID_HOME/build-tools/35.0.0"
 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Verify APK
+        shell: bash
         run: |
+          set -euo pipefail
           APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK_PATH" ]; then

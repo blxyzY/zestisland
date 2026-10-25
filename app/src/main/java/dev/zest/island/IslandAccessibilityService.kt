@@ -100,7 +100,11 @@ class IslandAccessibilityService : AccessibilityService() {
             shadeOpen = open
             refresh()
         }
+        // Selama terkunci, cek berkala: peristiwa aksesibilitas tidak selalu datang saat kunci dibuka.
+        if (locked) handler.postDelayed(checkShadeAgain, 350)
     }
+
+    private val checkShadeAgain = Runnable { handler.post(checkShade) }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -192,9 +196,10 @@ class IslandAccessibilityService : AccessibilityService() {
         // Baru saja dibuka kuncinya -> ikon gembok terbuka (sekali, dedupe di SystemNotices).
         if (lastLocked && !locked) SystemNotices.unlock()
         lastLocked = locked
+        val unlocking = IslandHub.snapshot().any { it.kind == Kind.NOTICE && it.glyph == "unlock" }
 
-        // Sembunyikan di layar kunci / layar mati / saat panel QS terbuka.
-        if (locked || shadeOpen) {
+        // Sembunyikan di layar kunci / layar mati / saat panel QS terbuka (kecuali animasi buka kunci).
+        if ((locked && !unlocking) || shadeOpen) {
             expanded = false
             seenAlerts.clear()
             expandedByAlert = false

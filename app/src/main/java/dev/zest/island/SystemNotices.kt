@@ -26,9 +26,9 @@ object SystemNotices {
                         if (mode == lastRinger) return
                         lastRinger = mode
                         when (mode) {
-                            AudioManager.RINGER_MODE_SILENT -> IslandHub.notice("silent", "Senyap", RED)
-                            AudioManager.RINGER_MODE_VIBRATE -> IslandHub.notice("vibrate", "Getar", ORANGE)
-                            else -> IslandHub.notice("ring", "Dering", -1)
+                            AudioManager.RINGER_MODE_SILENT -> IslandHub.notice("silent", s(c, R.string.notice_silent, "Silent"), RED)
+                            AudioManager.RINGER_MODE_VIBRATE -> IslandHub.notice("vibrate", s(c, R.string.notice_vibrate, "Vibrate"), ORANGE)
+                            else -> IslandHub.notice("ring", s(c, R.string.notice_ring, "Ring"), -1)
                         }
                     }
                     Intent.ACTION_POWER_CONNECTED -> {
@@ -44,6 +44,11 @@ object SystemNotices {
             } catch (_: Throwable) {}
         }
     }
+
+    /** Teks dari resource ZestIsland; di proses SystemUI konteksnya beda paket, jadi ambil lewat paket sendiri. */
+    private fun s(c: Context, id: Int, fallback: String): String = try {
+        c.createPackageContext("dev.zest.island", 0).getString(id)
+    } catch (_: Throwable) { fallback }
 
     private var lastUnlock = 0L
 

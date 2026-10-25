@@ -41,6 +41,7 @@ class IslandNotificationListener : NotificationListenerService() {
     private val controllers = HashMap<String, Pair<MediaController, MediaController.Callback>>()
     private var msm: MediaSessionManager? = null
     private val clockStart = HashMap<String, Long>()
+    private val clockLast = HashMap<String, Long>()
     private val mainH = android.os.Handler(android.os.Looper.getMainLooper())
     private val idleRemovers = HashMap<String, Runnable>()
     private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { syncSessions(it) }
@@ -81,6 +82,7 @@ class IslandNotificationListener : NotificationListenerService() {
         var chrono = ex.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER, false)
         var chronoWhen = n.`when`
         var chronoDown = ex.getBoolean("android.chronometerCountDown", false)
+        var frozenFromView = -1L
         val isCall = n.category == Notification.CATEGORY_CALL
         val ongoing = (n.flags and (Notification.FLAG_ONGOING_EVENT or Notification.FLAG_FOREGROUND_SERVICE)) != 0
         // Stopwatch/timer Samsung Jam sering memakai tampilan kustom tanpa chronometer standar.
@@ -94,11 +96,20 @@ class IslandNotificationListener : NotificationListenerService() {
         )
         if (!chrono && !isCall && (n.flags and Notification.FLAG_ONGOING_EVENT) != 0) {
             // Stopwatch/timer aplikasi jam sering memakai tampilan kustom berisi Chronometer.
-            scanChronometer(sbn)?.let { (w, down) ->
-                chrono = true
-                chronoWhen = w
-                chronoDown = down
+            scanChronometer(sbn)?.let { cs ->
+                if (cs.started) {
+                    chrono = true
+                    chronoWhen = cs.whenMs
+                    chronoDown = cs.down
+                } else {
+                    // Chronometer ada tapi dihentikan -> tampilkan nilai yang membeku.
+                    frozenFromView = parseTime(cs.text)
+                }
             }
+        }
+        var clockText: Long = -1L
+        if (!chrono && !isCall && isClock && frozenFromView < 0) {
+            clockText = scanTexts(sbn).asSequence().map { parseTime(it) }.firstOrNull { it >= 0 } ?: -1L
         }
 
         when {
@@ -111,6 +122,7 @@ class IslandNotificationListener : NotificationListenerService() {
                 )
                 item.icon = icon
                 item.tap = n.contentIntent
+                item.pkg = sbn.packageName
                 item.actions = (n.actions ?: emptyArray()).mapNotNull { a ->
                     val pi = a.actionIntent
                     val t = a.title?.toString().orEmpty()
@@ -119,6 +131,15 @@ class IslandNotificationListener : NotificationListenerService() {
                 if (chrono) {
                     item.whenMs = chronoWhen
                     item.countDown = chronoDown
+                } else if (frozenFromView >= 0) {
+                    item.frozenMs = frozenFromView
+                } else if (isClock && clockText >= 0) {
+                    // Tampilan kustom: waktu dibaca dari teks. Teks tidak berubah di posting ulang = berhenti.
+                    val prev = clockLast[sbn.key]
+                    clockLast[sbn.key] = clockText
+                    android.util.Log.d("ZestIsland", "clock text=$clockText prev=$prev")
+                    if (prev != null && prev == clockText) item.frozenMs = clockText
+                    else item.whenMs = System.currentTimeMillis() - clockText
                 } else if (isClock) {
                     // Tanpa Chronometer standar: pakai n.when bila masuk akal, kalau tidak waktu pertama terlihat.
                     val now = System.currentTimeMillis()
@@ -130,38 +151,68 @@ class IslandNotificationListener : NotificationListenerService() {
             }
             (n.flags and Notification.FLAG_ONGOING_EVENT) != 0 -> Unit   // abaikan layanan latar
             title.isNotEmpty() || text.isNotEmpty() ->
-                IslandHub.alert(sbn.key, title.ifEmpty { app }, text.ifEmpty { app }, icon, n.contentIntent)
+                IslandHub.alert(sbn.key, title.ifEmpty { app }, text.ifEmpty { app }, icon, n.contentIntent, 5000L, sbn.packageName)
         }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         clockStart.remove(sbn.key)
+        clockLast.remove(sbn.key)
         IslandHub.remove(sbn.key)
         IslandHub.remove("alert:" + sbn.key)
     }
 
-    /** Cari Chronometer berjalan di RemoteViews notifikasi; hasil: (waktu mulai ms jam dinding, hitung mundur). */
-    private fun scanChronometer(sbn: StatusBarNotification): Pair<Long, Boolean>? {
+    private class ClockScan(val whenMs: Long, val down: Boolean, val started: Boolean, val text: String)
+
+    private fun applied(sbn: StatusBarNotification): List<View> {
         val n = sbn.notification
         val views = listOfNotNull(n.contentView, n.bigContentView, n.headsUpContentView)
-        if (views.isEmpty()) return null
-        val ctx = try { createPackageContext(sbn.packageName, 0) } catch (_: Throwable) { return null }
+        if (views.isEmpty()) return emptyList()
+        val ctx = try { createPackageContext(sbn.packageName, 0) } catch (_: Throwable) { return emptyList() }
+        val out = ArrayList<View>()
         for (rv in views) {
-            try {
-                val root = rv.apply(ctx, FrameLayout(ctx))
-                val ch = findChronometer(root) ?: continue
-                val started = try {
-                    val f = Chronometer::class.java.getDeclaredField("mStarted")
-                    f.isAccessible = true
-                    f.getBoolean(ch)
-                } catch (_: Throwable) { true }
-                if (!started) continue
-                val down = ch.isCountDown
-                val wall = System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime() + ch.base
-                return wall to down
-            } catch (_: Throwable) {}
+            try { out.add(rv.apply(ctx, FrameLayout(ctx))) } catch (_: Throwable) {}
+        }
+        return out
+    }
+
+    /** Cari Chronometer di RemoteViews notifikasi (berjalan atau berhenti). */
+    private fun scanChronometer(sbn: StatusBarNotification): ClockScan? {
+        for (root in applied(sbn)) {
+            val ch = findChronometer(root) ?: continue
+            val started = try {
+                val f = Chronometer::class.java.getDeclaredField("mStarted")
+                f.isAccessible = true
+                f.getBoolean(ch)
+            } catch (_: Throwable) { true }
+            val wall = System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime() + ch.base
+            return ClockScan(wall, ch.isCountDown, started, ch.text?.toString().orEmpty())
         }
         return null
+    }
+
+    private fun scanTexts(sbn: StatusBarNotification): List<String> {
+        val out = ArrayList<String>()
+        fun walk(v: View) {
+            if (v is android.widget.TextView) v.text?.toString()?.let { if (it.isNotEmpty()) out.add(it) }
+            if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
+        }
+        for (r in applied(sbn)) walk(r)
+        android.util.Log.d("ZestIsland", "clock texts=$out")
+        return out
+    }
+
+    private val timeRe = Regex("""(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?""")
+
+    /** "1:02:03", "02:03.45" -> milidetik; -1 bila bukan format waktu. */
+    private fun parseTime(t: String): Long {
+        val m = timeRe.find(t) ?: return -1L
+        val h = m.groupValues[1].toLongOrNull() ?: 0L
+        val mi = m.groupValues[2].toLongOrNull() ?: return -1L
+        val s = m.groupValues[3].toLongOrNull() ?: return -1L
+        val fr = m.groupValues[4]
+        val ms = if (fr.isEmpty()) 0L else (fr.padEnd(3, '0').take(3).toLongOrNull() ?: 0L)
+        return ((h * 60 + mi) * 60 + s) * 1000 + ms
     }
 
     private fun findChronometer(v: View): Chronometer? {

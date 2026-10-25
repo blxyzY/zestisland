@@ -3,6 +3,7 @@ package dev.zest.island
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapShader
+import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
@@ -283,7 +284,7 @@ class IslandView(context: Context) : View(context) {
     /** Area sentuh saat ini (koordinat jendela) untuk touchable region. */
     fun touchBounds(out: Rect) {
         if (items.isEmpty() && vis.value < 0.02f) { out.setEmpty(); return }
-        val cx = width / 2f + offX
+        val cx = cx() + offX
         val slop = dp(8)
         val hw: Float
         val bottom: Float
@@ -497,14 +498,31 @@ class IslandView(context: Context) : View(context) {
 
     // --------------------------------------------------------------- sentuh
 
-    private enum class Hit { NONE, PILL, PREV, PLAY, NEXT, OPEN, ACTION }
+    private enum class Hit { NONE, PILL, PREV, PLAY, NEXT, OPEN, ACTION, SEEK }
+
+    private var seekBlock: Block? = null
+    private var seekFrac = 0f
+
+    /** Area bilah progress musik (diperlebar vertikal supaya mudah digeser). */
+    private fun seekRect(b: Block, out: RectF): RectF {
+        val r = blockRect(b, ctlTmp)
+        out.set(r.left, r.top + dp(62), r.right, r.top + dp(90))
+        return out
+    }
+
+    private fun fracAt(b: Block, x: Float): Float {
+        val r = blockRect(b, ctlTmp)
+        val p0 = r.left + dp(2)
+        val p1 = r.right - dp(2)
+        return ((x - offX - p0) / (p1 - p0)).coerceIn(0f, 1f)
+    }
 
     private var downHit = Hit.NONE
     private var downBlock: Block? = null
     private var downIdx = 0
     private var hitIdx = 0
 
-    private fun cx() = width / 2f
+    private fun cx() = (if (width > 0) width else (expandedW + 2 * margin).toInt()) / 2f
 
     private fun blockRect(b: Block, out: RectF): RectF {
         val l = cx() - blockW / 2f
@@ -562,6 +580,7 @@ class IslandView(context: Context) : View(context) {
             if (!b.live) continue
             val it = b.item
             if (it.kind == Kind.MEDIA) {
+                if (it.durationMs > 0 && seekRect(b, tmpR).contains(x, y)) return Hit.SEEK to b
                 val cr = controlRects(b)
                 if (cr[0].contains(x, y)) return Hit.PREV to b
                 if (cr[1].contains(x, y)) return Hit.PLAY to b
@@ -600,7 +619,21 @@ class IslandView(context: Context) : View(context) {
                     press.to(0.94f, 0.2f, 0.9f)
                     kick()
                 }
+                if (h == Hit.SEEK && b != null) {
+                    seekBlock = b
+                    seekFrac = fracAt(b, x)
+                    kick()
+                }
                 return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val sb = seekBlock
+                if (sb != null) {
+                    seekFrac = fracAt(sb, x)
+                    kick()
+                    return true
+                }
+                return downHit != Hit.NONE
             }
             MotionEvent.ACTION_UP -> {
                 val was = downHit
@@ -612,12 +645,26 @@ class IslandView(context: Context) : View(context) {
                     press.to(1f, 0.35f, 0.6f)
                     kick()
                 }
+                val sb = seekBlock
+                if (sb != null) {
+                    seekBlock = null
+                    val it = sb.item
+                    if (action == MotionEvent.ACTION_UP && it.durationMs > 0) {
+                        val to = (fracAt(sb, x) * it.durationMs).toLong()
+                        try { it.controller?.transportControls?.seekTo(to) } catch (_: Throwable) {}
+                        it.positionMs = to
+                        it.posTime = SystemClock.elapsedRealtime()
+                    }
+                    kick()
+                    return true
+                }
                 if (was == Hit.NONE) return false
                 val (h, b) = hit(x, y)
                 if (h == was && b === wasBlock && hitIdx == wasIdx) perform(h, b, wasIdx)
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
+                seekBlock = null
                 if (downHit == Hit.PILL) {
                     press.to(1f, 0.35f, 0.6f)
                     kick()
@@ -628,6 +675,32 @@ class IslandView(context: Context) : View(context) {
             }
         }
         return downHit != Hit.NONE
+    }
+
+    /** Buka aplikasi sumber: pakai intent notifikasi/sesi; kalau tidak ada atau gagal, buka peluncur aplikasinya. */
+    private fun openApp(item: IslandItem) {
+        val pi = if (item.kind == Kind.MEDIA) item.controller?.sessionActivity else item.tap
+        var ok = false
+        if (pi != null) {
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 34) {
+                    val o = android.app.ActivityOptions.makeBasic()
+                    o.setPendingIntentBackgroundActivityStartMode(
+                        android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                    )
+                    pi.send(context, 0, null, null, null, null, o.toBundle())
+                } else pi.send()
+                ok = true
+            } catch (_: Throwable) {}
+        }
+        if (ok) return
+        val pkg = if (item.kind == Kind.MEDIA) item.controller?.packageName.orEmpty() else item.pkg
+        if (pkg.isEmpty()) return
+        try {
+            val li = context.packageManager.getLaunchIntentForPackage(pkg) ?: return
+            li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            context.startActivity(li)
+        } catch (_: Throwable) {}
     }
 
     private fun perform(h: Hit, b: Block?, idx: Int) {
@@ -642,12 +715,9 @@ class IslandView(context: Context) : View(context) {
                     else it.controller?.transportControls?.play()
                 }
                 // Ketuk isi kartu: buka aplikasinya, island tetap terbuka (tutup sendiri / ketuk di luar).
-                Hit.OPEN -> if (item != null) {
-                    if (item.kind == Kind.MEDIA) item.controller?.sessionActivity?.send()
-                    else item.tap?.send()
-                }
+                Hit.OPEN -> if (item != null) openApp(item)
                 Hit.ACTION -> item?.actions?.getOrNull(idx)?.intent?.send()
-                Hit.NONE -> Unit
+                Hit.SEEK, Hit.NONE -> Unit
             }
         } catch (_: Throwable) {}
     }
@@ -1021,7 +1091,11 @@ class IslandView(context: Context) : View(context) {
         var pos = i.positionMs
         if (i.playing) pos += ((SystemClock.elapsedRealtime() - i.posTime) * i.speed).toLong()
         pos = if (i.durationMs > 0) pos.coerceIn(0L, i.durationMs) else max(pos, 0L)
-        val frac = if (i.durationMs > 0) pos.toFloat() / i.durationMs else 0f
+        var frac = if (i.durationMs > 0) pos.toFloat() / i.durationMs else 0f
+        if (seekBlock === b && i.durationMs > 0) {
+            frac = seekFrac
+            pos = (seekFrac * i.durationMs).toLong()
+        }
         val px0 = x0 + dp(2)
         val px1 = x0 + blockW - dp(2)
         val py = y0 + dp(76)
@@ -1102,7 +1176,8 @@ class IslandView(context: Context) : View(context) {
 
     private fun formatTimer(item: IslandItem, short: Boolean): String {
         val now = System.currentTimeMillis()
-        var ms = if (item.countDown) item.whenMs - now else now - item.whenMs
+        var ms = if (item.frozenMs >= 0L) item.frozenMs
+        else if (item.countDown) item.whenMs - now else now - item.whenMs
         if (ms < 0) ms = 0
         val h = ms / 3_600_000
         val m = (ms / 60_000) % 60

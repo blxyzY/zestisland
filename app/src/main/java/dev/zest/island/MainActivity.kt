@@ -23,14 +23,14 @@ class MainActivity : Activity() {
             text = t
             setOnClickListener { a() }
         }
-        col.addView(btn("Aktifkan otomatis (butuh priv-app)") { AutoEnable.run(this); update() })
-        col.addView(btn("Buka pengaturan Aksesibilitas") {
+        col.addView(btn(getString(R.string.btn_auto)) { AutoEnable.run(this); update() })
+        col.addView(btn(getString(R.string.btn_a11y)) {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
-        col.addView(btn("Buka akses notifikasi") {
+        col.addView(btn(getString(R.string.btn_notif)) {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         })
-        col.addView(btn("Tes island") { IslandHub.systemAlert("Halo", "Island aktif") })
+        col.addView(btn(getString(R.string.btn_test)) { IslandHub.systemAlert(getString(R.string.test_title), getString(R.string.test_sub)) })
         setContentView(col)
     }
 
@@ -40,8 +40,10 @@ class MainActivity : Activity() {
     }
 
     private fun update() {
-        status.text = "Izin sistem: " + (if (AutoEnable.canWrite(this)) "ada" else "tidak ada") +
-            "\nAksesibilitas: " + (if (AutoEnable.a11yOn(this)) "aktif" else "mati") +
-            "\nAkses notifikasi: " + (if (AutoEnable.listenerOn(this)) "aktif" else "mati")
+        fun yn(v: Boolean) = getString(if (v) R.string.st_yes else R.string.st_no)
+        fun oo(v: Boolean) = getString(if (v) R.string.st_on else R.string.st_off)
+        status.text = getString(R.string.st_perm, yn(AutoEnable.canWrite(this))) +
+            "\n" + getString(R.string.st_a11y, oo(AutoEnable.a11yOn(this))) +
+            "\n" + getString(R.string.st_notif, oo(AutoEnable.listenerOn(this)))
     }
 }

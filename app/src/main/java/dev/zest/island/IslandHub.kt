@@ -35,7 +35,9 @@ class IslandItem(
     var level: Int = 0                      // NOTICE: persen baterai
     var actions: List<IslandAction> = emptyList()
     var shownAt: Long = 0L                  // NOTICE: uptimeMillis saat muncul (untuk animasi)
-    val hasTimer: Boolean get() = whenMs > 0L
+    var pkg: String = ""                    // paket aplikasi sumber (untuk membuka aplikasinya)
+    var frozenMs: Long = -1L                // >=0: timer/stopwatch sedang berhenti di nilai ini
+    val hasTimer: Boolean get() = whenMs > 0L || frozenMs >= 0L
 }
 
 /** Penampung status bersama; semua akses dialihkan ke main thread. */
@@ -74,11 +76,13 @@ object IslandHub {
         icon: Drawable? = null,
         tap: PendingIntent? = null,
         ms: Long = 5000L,
+        pkg: String = "",
     ) {
         main.post {
             val item = IslandItem("alert:$key", Kind.ALERT, title, subtitle)
             item.icon = icon
             item.tap = tap
+            item.pkg = pkg
             items[item.key] = item
             drops.remove(item.key)?.let { main.removeCallbacks(it) }
             val r = Runnable {

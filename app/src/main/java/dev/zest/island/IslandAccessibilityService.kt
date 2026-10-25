@@ -6,34 +6,43 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.graphics.PixelFormat
 import android.database.ContentObserver
+import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.net.Uri
-import android.os.BatteryManager
-import android.provider.Settings
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.FrameLayout
-import kotlin.math.max
 
-/** Memasang overlay island dan mengatur buka/tutup. */
+/**
+ * Memasang island memakai DUA jendela overlay:
+ *  1. jendela gambar: ukuran tetap, tidak menerima sentuhan, tidak pernah diubah ukurannya
+ *     (mengubah ukuran jendela saat animasi membuat satu frame bergeser/berkedip);
+ *  2. jendela sentuh: transparan, hanya seukuran pil/kartu; ukurannya boleh berubah karena tak terlihat.
+ */
 class IslandAccessibilityService : AccessibilityService() {
     private lateinit var wm: WindowManager
     private lateinit var view: IslandView
-    private lateinit var holder: Holder
+    private lateinit var holder: FrameLayout
+    private lateinit var touchView: TouchCatcher
+    private var lpVis: WindowManager.LayoutParams? = null
+    private var lpTouch: WindowManager.LayoutParams? = null
     private val handler = Handler(Looper.getMainLooper())
     private var attached = false
     private var expanded = false
     private val seenAlerts = HashSet<String>()
     private var expandedByAlert = false
-    private var params: WindowManager.LayoutParams? = null
     private var shadeOpen = false
+    private var lastLocked = false
     private val km by lazy { getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager }
+    private val tb = Rect()
 
     private var offX = 0
     private var offY = 0
@@ -44,18 +53,22 @@ class IslandAccessibilityService : AccessibilityService() {
 
     private fun geti(k: String) = Settings.System.getInt(contentResolver, k, 0)
 
+    private fun screenW(): Int = try {
+        wm.currentWindowMetrics.bounds.width()
+    } catch (_: Throwable) { resources.displayMetrics.widthPixels }
+
     /** Baca ukuran/posisi pill dari UN1CA Settings (dp), lalu terapkan. */
     private fun loadPrefs() {
         val d = resources.displayMetrics.density
         view.setPillSize(geti("zest_island_width"), geti("zest_island_height"))
-        if (attached) applyWindow()
         offX = (geti("zest_island_x").coerceIn(-400, 400) * d).toInt()
         offY = (geti("zest_island_y").coerceIn(-100, 600) * d).toInt()
-        val p = params
-        if (attached && p != null && (p.x != offX || p.y != offY)) {
-            p.x = offX
+        val p = lpVis
+        if (attached && p != null) {
+            p.x = (screenW() - p.width) / 2 + offX
             p.y = offY
             try { wm.updateViewLayout(holder, p) } catch (_: Throwable) {}
+            updateTouchWindow()
         }
     }
 
@@ -64,7 +77,10 @@ class IslandAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(refreshRun)
         handler.postDelayed(refreshRun, 16)
     }
+    private val refreshRun = Runnable { refresh() }
     private val collapse = Runnable { setExpanded(false) }
+    private val detachRun = Runnable { if (IslandHub.snapshot().isEmpty()) detach() }
+
     /**
      * Panel QS / shade terbuka = jendela sistem fokus berjudul "notification shade" dst.
      * Hanya membaca daftar jendela (murah); root jendela dibaca hanya untuk satu kandidat.
@@ -79,28 +95,13 @@ class IslandAccessibilityService : AccessibilityService() {
                     (t.isEmpty() && cand.root?.packageName?.toString() == "com.android.systemui")
             }
         } catch (_: Throwable) { false }
-        if (open != shadeOpen) {
+        val locked = try { km.isKeyguardLocked } catch (_: Throwable) { false }
+        if (open != shadeOpen || locked != lastLocked) {
             shadeOpen = open
             refresh()
         }
     }
-    private var windowBig = false
-    private val detachRun = Runnable { if (IslandHub.snapshot().isEmpty()) detach() }
-    private val refreshRun = Runnable { refresh() }
-    private val doExpand = Runnable {
-        if (expanded && attached) view.bind(IslandHub.snapshot(), true)
-    }
-    private fun shrinkNow() {
-        if (expanded) return
-        if (!view.isSettled()) {
-            handler.postDelayed(shrink, 200)
-            return
-        }
-        val (w, h) = view.collapsedWindowSize()
-        setWindowSize(w, h)
-        windowBig = false
-    }
-    private val shrink: Runnable = Runnable { shrinkNow() }
+
     private val ticker = object : Runnable {
         override fun run() {
             view.tick()
@@ -111,15 +112,12 @@ class IslandAccessibilityService : AccessibilityService() {
 
     private val power = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
-            val level = c.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-                ?.let { b ->
-                    val l = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-                    val s = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
-                    if (l >= 0) l * 100 / s else -1
-                } ?: -1
-            val text = if (level >= 0) "$level%" else ""
             when (i.action) {
-                Intent.ACTION_SCREEN_OFF, Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> refresh()
+                Intent.ACTION_USER_PRESENT -> {
+                    SystemNotices.unlock()
+                    refresh()
+                }
+                Intent.ACTION_SCREEN_OFF, Intent.ACTION_SCREEN_ON -> refresh()
             }
         }
     }
@@ -132,7 +130,9 @@ class IslandAccessibilityService : AccessibilityService() {
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         view = IslandView(this)
         view.onToggle = { setExpanded(!expanded) }
-        holder = Holder(this)
+        view.onOutside = { if (expanded) setExpanded(false) }
+        view.onSettled = { updateTouchWindow() }
+        holder = FrameLayout(this)
         holder.addView(
             view,
             FrameLayout.LayoutParams(
@@ -140,7 +140,12 @@ class IslandAccessibilityService : AccessibilityService() {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
-        holder.onOutside = { if (expanded) setExpanded(false) }
+        touchView = TouchCatcher(this)
+        touchView.onTouch = { action, rx, ry ->
+            val p = lpVis
+            if (p == null) false else view.touchAt(action, rx - p.x, ry - p.y)
+        }
+        touchView.onOutside = { if (expanded) setExpanded(false) }
         IslandHub.addListener(hubListener)
         val f = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
@@ -151,6 +156,7 @@ class IslandAccessibilityService : AccessibilityService() {
         SystemNotices.register(applicationContext)
         for (k in prefKeys) contentResolver.registerContentObserver(Settings.System.getUriFor(k), false, prefObserver)
         loadPrefs()
+        lastLocked = try { km.isKeyguardLocked } catch (_: Throwable) { false }
         refresh()
     }
 
@@ -160,6 +166,7 @@ class IslandAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(checkShade)
         handler.postDelayed(checkShade, 150)
     }
+
     override fun onInterrupt() {}
 
     override fun onDestroy() {
@@ -181,11 +188,17 @@ class IslandAccessibilityService : AccessibilityService() {
     }
 
     private fun refresh() {
+        val locked = try { km.isKeyguardLocked } catch (_: Throwable) { false }
+        // Baru saja dibuka kuncinya -> ikon gembok terbuka (sekali, dedupe di SystemNotices).
+        if (lastLocked && !locked) SystemNotices.unlock()
+        lastLocked = locked
+
         // Sembunyikan di layar kunci / layar mati / saat panel QS terbuka.
-        if (km.isKeyguardLocked || shadeOpen) {
+        if (locked || shadeOpen) {
             expanded = false
             seenAlerts.clear()
             expandedByAlert = false
+            handler.removeCallbacks(collapse)
             stopTicker()
             detach()
             return
@@ -210,6 +223,7 @@ class IslandAccessibilityService : AccessibilityService() {
             stopTicker()
             if (attached) {
                 view.bind(items, false)            // animasi menghilang dulu
+                updateTouchWindow()
                 handler.removeCallbacks(detachRun)
                 handler.postDelayed(detachRun, 450)
             }
@@ -217,19 +231,9 @@ class IslandAccessibilityService : AccessibilityService() {
         }
         handler.removeCallbacks(detachRun)
         attach()
-        if (expanded && !windowBig) {
-            // Besarkan jendela dulu, baru mulai animasi (menghindari kedip saat surface berubah ukuran).
-            val (w, h) = view.expandedSize()
-            setWindowSize(w, h)
-            windowBig = true
-            view.bind(items, false)
-            handler.removeCallbacks(doExpand)
-            handler.postDelayed(doExpand, 70)
-        } else {
-            view.bind(items, expanded)
-        }
-        applyWindow()
-        val needTick = items.any { it.hasTimer } ||
+        view.bind(items, expanded)
+        updateTouchWindow()
+        val needTick = items.any { it.hasTimer || it.kind == Kind.NOTICE } ||
             (expanded && items.any { it.kind == Kind.MEDIA && it.playing }) ||
             items.firstOrNull()?.let { it.kind == Kind.MEDIA && it.playing } == true
         if (needTick) startTicker() else stopTicker()
@@ -237,10 +241,26 @@ class IslandAccessibilityService : AccessibilityService() {
 
     private fun attach() {
         if (attached) return
-        val (cw, ch) = view.collapsedWindowSize()
-        val lp = WindowManager.LayoutParams(
-            cw,
-            ch,
+        val (vw, vh) = view.fixedWindowSize()
+        val vis = WindowManager.LayoutParams(
+            vw,
+            vh,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (screenW() - vw) / 2 + offX
+            y = offY
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            title = "ZestIslandVisual"
+        }
+        val touch = WindowManager.LayoutParams(
+            1,
+            1,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
@@ -249,44 +269,56 @@ class IslandAccessibilityService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            x = offX
-            y = offY
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            title = "ZestIslandTouch"
         }
         try {
-            wm.addView(holder, lp)
-            params = lp
+            wm.addView(holder, vis)
+            lpVis = vis
+            wm.addView(touchView, touch)
+            lpTouch = touch
             attached = true
-        } catch (_: Throwable) {}
+            updateTouchWindow()
+        } catch (_: Throwable) {
+            try { wm.removeView(holder) } catch (_: Throwable) {}
+            attached = false
+        }
     }
 
-    /**
-     * Saat mengembang, jendela langsung dibuat seukuran kartu akhir sehingga animasi cukup
-     * mengubah ukuran view di dalamnya (tanpa mengubah ukuran jendela tiap frame).
-     */
-    private fun applyWindow() {
+    /** Jendela sentuh mengikuti area pil/kartu (gabungan posisi sekarang dan tujuan). */
+    private fun updateTouchWindow() {
         if (!attached) return
-        handler.removeCallbacks(shrink)
-        if (!expanded) handler.postDelayed(shrink, 700)
-    }
-
-    private fun setWindowSize(w: Int, h: Int) {
-        val p = params ?: return
-        if (!attached) return
-        if (p.width == w && p.height == h) return
+        val p = lpTouch ?: return
+        val v = lpVis ?: return
+        view.touchBounds(tb)
+        var x = 0
+        var y = 0
+        var w = 1
+        var h = 1
+        if (!tb.isEmpty) {
+            x = v.x + tb.left
+            y = v.y + tb.top
+            w = tb.width().coerceAtLeast(1)
+            h = tb.height().coerceAtLeast(1)
+        }
+        if (p.x == x && p.y == y && p.width == w && p.height == h) return
+        p.x = x
+        p.y = y
         p.width = w
         p.height = h
-        try { wm.updateViewLayout(holder, p) } catch (_: Throwable) {}
+        try { wm.updateViewLayout(touchView, p) } catch (_: Throwable) {}
     }
 
     private fun detach() {
-        windowBig = false
-        handler.removeCallbacks(doExpand)
         if (!attached) return
-        handler.removeCallbacks(shrink)
+        try { wm.removeView(touchView) } catch (_: Throwable) {}
         try { wm.removeView(holder) } catch (_: Throwable) {}
         attached = false
+        lpVis = null
+        lpTouch = null
     }
 
     private fun startTicker() {
@@ -301,14 +333,16 @@ class IslandAccessibilityService : AccessibilityService() {
     }
 }
 
-/** Akar jendela: menangkap ketukan di luar kartu. */
-private class Holder(context: Context) : FrameLayout(context) {
+/** Jendela sentuh transparan: meneruskan sentuhan (koordinat layar) ke island. */
+private class TouchCatcher(context: Context) : View(context) {
+    var onTouch: ((Int, Float, Float) -> Boolean)? = null
     var onOutside: (() -> Unit)? = null
 
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.action == MotionEvent.ACTION_OUTSIDE || event.action == MotionEvent.ACTION_DOWN) {
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) {
             onOutside?.invoke()
+            return false
         }
-        return false
+        return onTouch?.invoke(e.actionMasked, e.rawX, e.rawY) ?: false
     }
 }

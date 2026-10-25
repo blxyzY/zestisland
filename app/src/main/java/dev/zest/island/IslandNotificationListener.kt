@@ -110,9 +110,21 @@ class IslandNotificationListener : NotificationListenerService() {
                     text.ifEmpty { app }
                 )
                 item.icon = icon
+                item.tap = n.contentIntent
+                item.actions = (n.actions ?: emptyArray()).mapNotNull { a ->
+                    val pi = a.actionIntent
+                    val t = a.title?.toString().orEmpty()
+                    if (pi == null || t.isEmpty() || a.remoteInputs != null) null else IslandAction(t, pi)
+                }.take(3)
                 if (chrono) {
                     item.whenMs = chronoWhen
                     item.countDown = chronoDown
+                } else if (isClock) {
+                    // Tanpa Chronometer standar: pakai n.when bila masuk akal, kalau tidak waktu pertama terlihat.
+                    val now = System.currentTimeMillis()
+                    val w = n.`when`
+                    item.whenMs = if (w in 1 until (now - 2000L) && now - w < 86_400_000L) w
+                    else clockStart.getOrPut(sbn.key) { now }
                 }
                 IslandHub.put(item)
             }

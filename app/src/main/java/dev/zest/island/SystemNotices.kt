@@ -39,10 +39,20 @@ object SystemNotices {
                         val l = level(c)
                         IslandHub.notice("low", if (l >= 0) "$l%" else "", RED, maxOf(l, 0), 3500L)
                     }
-                    Intent.ACTION_USER_PRESENT -> IslandHub.notice("unlock", "", -1, 0, 1500L)
+                    Intent.ACTION_USER_PRESENT -> unlock()
                 }
             } catch (_: Throwable) {}
         }
+    }
+
+    private var lastUnlock = 0L
+
+    /** Ikon gembok terbuka (gaya iPhone). Aman dipanggil dari beberapa tempat: yang kedua diabaikan. */
+    fun unlock() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastUnlock < 2000L) return
+        lastUnlock = now
+        IslandHub.notice("unlock", "", -1, 0, 1600L)
     }
 
     fun level(c: Context): Int {

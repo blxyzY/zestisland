@@ -105,6 +105,8 @@ private class Block(val key: String, var item: IslandItem) {
 class IslandView(context: Context) : View(context) {
     var onToggle: (() -> Unit)? = null
     var onOutside: (() -> Unit)? = null
+    /** Dipanggil saat semua pegas diam (dipakai service untuk merapikan area sentuh). */
+    var onSettled: (() -> Unit)? = null
 
     private val density = resources.displayMetrics.density
     private fun dp(v: Int): Float = v * density
@@ -171,6 +173,10 @@ class IslandView(context: Context) : View(context) {
     private val tNotice = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFFFFF.toInt(); textSize = sp(13f); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     }
+    private val tBtn = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt(); textSize = sp(13f); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        textAlign = Paint.Align.CENTER
+    }
     private val tSmall = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFA0A0A8.toInt(); textSize = sp(11f); fontFeatureSettings = "tnum"
     }
@@ -202,6 +208,7 @@ class IslandView(context: Context) : View(context) {
                 lastNs = 0L
                 dirtyW = 0f; dirtyH = 0f
                 invalidate()   // bersihkan sisa area gambar
+                onSettled?.invoke()
             }
         }
     }
@@ -268,7 +275,10 @@ class IslandView(context: Context) : View(context) {
     }
 
     /** Tinggi jendela tetap yang cukup untuk kartu terbesar (3 notifikasi + musik). */
-    fun fixedWindowHeight(): Int = (dp(430) + max(0f, offY)).toInt()
+    fun fixedWindowHeight(): Int = (dp(500) + max(0f, offY)).toInt()
+
+    /** Ukuran jendela gambar yang TIDAK pernah berubah (mode Aksesibilitas). */
+    fun fixedWindowSize(): Pair<Int, Int> = Pair((expandedW + 2 * margin).toInt(), dp(500).toInt())
 
     /** Area sentuh saat ini (koordinat jendela) untuk touchable region. */
     fun touchBounds(out: Rect) {
@@ -278,12 +288,14 @@ class IslandView(context: Context) : View(context) {
         val hw: Float
         val bottom: Float
         var extraRight = 0f
+        val tw = max(sw.value, sw.target)
+        val th = max(sh.value, sh.target)
         if (expanded || sa.value > 0.02f) {
-            hw = max(sw.value, expandedW) / 2f
-            bottom = max(sh.value, cardH)
+            hw = max(tw, expandedW) / 2f
+            bottom = max(th, cardH)
         } else {
-            hw = max(sw.value, collapsedW) / 2f
-            bottom = max(sh.value, collapsedH)
+            hw = max(tw, collapsedW) / 2f
+            bottom = max(th, collapsedH)
             if (satItem != null || split.value > 0.02f) extraRight = satGap + satD
         }
         out.set(
@@ -384,7 +396,14 @@ class IslandView(context: Context) : View(context) {
         return sh
     }
 
-    private fun blockHeight(i: IslandItem): Float = if (i.kind == Kind.MEDIA) dp(132) else dp(64)
+    private fun hasActions(i: IslandItem) =
+        (i.kind == Kind.TIMER || i.kind == Kind.CALL) && i.actions.isNotEmpty()
+
+    private fun blockHeight(i: IslandItem): Float = when {
+        i.kind == Kind.MEDIA -> dp(132)
+        hasActions(i) -> dp(104)
+        else -> dp(64)
+    }
 
     private fun syncBlocks() {
         val list = items.filter { it.kind != Kind.NOTICE }
@@ -422,6 +441,8 @@ class IslandView(context: Context) : View(context) {
         cardH = if (live.isEmpty()) collapsedH else cursor - blockGap + pad
     }
 
+    private val timeLike = Regex("[0-9:.\\s]*")
+
     private fun prepare(b: Block) {
         val i = b.item
         val media = i.kind == Kind.MEDIA
@@ -433,7 +454,8 @@ class IslandView(context: Context) : View(context) {
         }
         val maxW = max(dp(40), blockW - left - right)
         b.title = TextUtils.ellipsize(i.title, tTitle, maxW, TextUtils.TruncateAt.END).toString()
-        b.sub = TextUtils.ellipsize(i.subtitle, tSub, maxW, TextUtils.TruncateAt.END).toString()
+        val subSrc = if (i.hasTimer && timeLike.matches(i.subtitle)) "" else i.subtitle
+        b.sub = TextUtils.ellipsize(subSrc, tSub, maxW, TextUtils.TruncateAt.END).toString()
         val art = i.art
         if (art != null) {
             if (art !== b.artBmp) {
@@ -475,10 +497,12 @@ class IslandView(context: Context) : View(context) {
 
     // --------------------------------------------------------------- sentuh
 
-    private enum class Hit { NONE, PILL, PREV, PLAY, NEXT, OPEN, CARD }
+    private enum class Hit { NONE, PILL, PREV, PLAY, NEXT, OPEN, ACTION }
 
     private var downHit = Hit.NONE
     private var downBlock: Block? = null
+    private var downIdx = 0
+    private var hitIdx = 0
 
     private fun cx() = width / 2f
 
@@ -503,12 +527,25 @@ class IslandView(context: Context) : View(context) {
         return ctlRects
     }
 
+    /** Persegi tombol aksi ke-[idx] dari [n] pada kartu timer/telepon. */
+    private fun actionRect(b: Block, idx: Int, n: Int, out: RectF): RectF {
+        val r = blockRect(b, ctlTmp)
+        val gap = dp(8)
+        val left = r.left + dp(10)
+        val total = r.width() - dp(20)
+        val w = (total - gap * (n - 1)) / n
+        val x = left + idx * (w + gap)
+        out.set(x, r.top + dp(64), x + w, r.top + dp(96))
+        return out
+    }
+
     private val hitTmp = RectF()
 
     private fun hit(rx: Float, ry: Float): Pair<Hit, Block?> {
         val x = rx - offX
         val y = ry - offY
         val cx = cx()
+        hitIdx = 0
         if (!expanded) {
             val slop = dp(6)
             val hw = max(collapsedW, sw.value) / 2f
@@ -523,28 +560,41 @@ class IslandView(context: Context) : View(context) {
         val tmpR = hitTmp
         for (b in blocks) {
             if (!b.live) continue
-            if (b.item.kind == Kind.MEDIA) {
+            val it = b.item
+            if (it.kind == Kind.MEDIA) {
                 val cr = controlRects(b)
                 if (cr[0].contains(x, y)) return Hit.PREV to b
                 if (cr[1].contains(x, y)) return Hit.PLAY to b
                 if (cr[2].contains(x, y)) return Hit.NEXT to b
+            } else if (hasActions(it)) {
+                for (k in it.actions.indices) {
+                    if (actionRect(b, k, it.actions.size, tmpR).contains(x, y)) {
+                        hitIdx = k
+                        return Hit.ACTION to b
+                    }
+                }
             }
             if (blockRect(b, tmpR).contains(x, y)) return Hit.OPEN to b
         }
-        if (x >= cx - sw.value / 2f && x <= cx + sw.value / 2f && y <= sh.value) return Hit.CARD to null
         return Hit.NONE to null
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        when (e.actionMasked) {
-            MotionEvent.ACTION_OUTSIDE -> {
-                if (expanded) onOutside?.invoke()
-                return false
-            }
+        if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+            if (expanded) onOutside?.invoke()
+            return false
+        }
+        return touchAt(e.actionMasked, e.x, e.y)
+    }
+
+    /** Logika sentuh bersama (dipanggil juga dari jendela sentuh terpisah di mode Aksesibilitas). */
+    fun touchAt(action: Int, x: Float, y: Float): Boolean {
+        when (action) {
             MotionEvent.ACTION_DOWN -> {
-                val (h, b) = hit(e.x, e.y)
+                val (h, b) = hit(x, y)
                 downHit = h
                 downBlock = b
+                downIdx = hitIdx
                 if (h == Hit.NONE) return false
                 if (h == Hit.PILL) {
                     press.to(0.94f, 0.2f, 0.9f)
@@ -555,6 +605,7 @@ class IslandView(context: Context) : View(context) {
             MotionEvent.ACTION_UP -> {
                 val was = downHit
                 val wasBlock = downBlock
+                val wasIdx = downIdx
                 downHit = Hit.NONE
                 downBlock = null
                 if (was == Hit.PILL) {
@@ -562,8 +613,8 @@ class IslandView(context: Context) : View(context) {
                     kick()
                 }
                 if (was == Hit.NONE) return false
-                val (h, b) = hit(e.x, e.y)
-                if (h == was && b === wasBlock) perform(h, b)
+                val (h, b) = hit(x, y)
+                if (h == was && b === wasBlock && hitIdx == wasIdx) perform(h, b, wasIdx)
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
@@ -579,24 +630,23 @@ class IslandView(context: Context) : View(context) {
         return downHit != Hit.NONE
     }
 
-    private fun perform(h: Hit, b: Block?) {
+    private fun perform(h: Hit, b: Block?, idx: Int) {
         val item = b?.item
         try {
             when (h) {
-                Hit.PILL, Hit.CARD -> onToggle?.invoke()
+                Hit.PILL -> onToggle?.invoke()
                 Hit.PREV -> item?.controller?.transportControls?.skipToPrevious()
                 Hit.NEXT -> item?.controller?.transportControls?.skipToNext()
                 Hit.PLAY -> item?.let {
                     if (it.playing) it.controller?.transportControls?.pause()
                     else it.controller?.transportControls?.play()
                 }
-                Hit.OPEN -> {
-                    if (item != null) {
-                        if (item.kind == Kind.MEDIA) item.controller?.sessionActivity?.send()
-                        else item.tap?.send()
-                    }
-                    onToggle?.invoke()
+                // Ketuk isi kartu: buka aplikasinya, island tetap terbuka (tutup sendiri / ketuk di luar).
+                Hit.OPEN -> if (item != null) {
+                    if (item.kind == Kind.MEDIA) item.controller?.sessionActivity?.send()
+                    else item.tap?.send()
                 }
+                Hit.ACTION -> item?.actions?.getOrNull(idx)?.intent?.send()
                 Hit.NONE -> Unit
             }
         } catch (_: Throwable) {}
@@ -878,6 +928,8 @@ class IslandView(context: Context) : View(context) {
         c.drawRoundRect(rect, dp(1f), dp(1f), fill)
     }
 
+    private val btnRect = RectF()
+
     private fun drawBlock(c: Canvas, b: Block, cx: Float, a: Float) {
         val ia = (255 * a).toInt()
         val x0 = cx - blockW / 2f
@@ -892,7 +944,7 @@ class IslandView(context: Context) : View(context) {
         c.drawRoundRect(rect, dp(20), dp(20), blockBg)
         // ikon
         val ix = x0 + dp(10)
-        val iy = y0 + (b.h - dp(40)) / 2f
+        val iy = y0 + dp(12)
         iconBg.alpha = ia
         rect.set(ix, iy, ix + dp(40), iy + dp(40))
         c.drawRoundRect(rect, dp(12), dp(12), iconBg)
@@ -900,13 +952,40 @@ class IslandView(context: Context) : View(context) {
         val tx = x0 + dp(60)
         tTitle.alpha = ia
         tSub.alpha = ia
-        c.drawText(b.title, tx, y0 + b.h * 0.42f, tTitle)
-        if (b.sub.isNotEmpty()) c.drawText(b.sub, tx, y0 + b.h * 0.70f, tSub)
+        if (b.sub.isEmpty()) {
+            c.drawText(b.title, tx, y0 + dp(37), tTitle)
+        } else {
+            c.drawText(b.title, tx, y0 + dp(29), tTitle)
+            c.drawText(b.sub, tx, y0 + dp(47), tSub)
+        }
         if (i.hasTimer) {
             tBig.alpha = ia
             val fm = tBig.fontMetrics
-            c.drawText(formatTimer(i, false), x0 + blockW - dp(14), y0 + b.h / 2f - (fm.ascent + fm.descent) / 2f, tBig)
+            c.drawText(formatTimer(i, false), x0 + blockW - dp(14), y0 + dp(32) - (fm.ascent + fm.descent) / 2f, tBig)
         }
+        // tombol aksi (Berhenti / Jeda / Tolak / Akhiri ...)
+        if (hasActions(i)) {
+            val n = i.actions.size
+            for (k in 0 until n) {
+                actionRect(b, k, n, btnRect)
+                val t = i.actions[k].title
+                val danger = isDanger(t)
+                fill.color = if (danger) 0xFFFF453A.toInt() else 0xFF3A3A40.toInt()
+                fill.alpha = ia
+                c.drawRoundRect(btnRect, dp(15), dp(15), fill)
+                tBtn.alpha = ia
+                val fm = tBtn.fontMetrics
+                val label = TextUtils.ellipsize(t, tBtn, btnRect.width() - dp(12), TextUtils.TruncateAt.END).toString()
+                c.drawText(label, btnRect.centerX(), btnRect.centerY() - (fm.ascent + fm.descent) / 2f, tBtn)
+            }
+        }
+    }
+
+    private fun isDanger(t: String): Boolean {
+        val l = t.lowercase()
+        return l.contains("stop") || l.contains("berhenti") || l.contains("hentikan") || l.contains("akhiri") ||
+            l.contains("tolak") || l.contains("decline") || l.contains("end") || l.contains("reset") ||
+            l.contains("matikan") || l.contains("tutup")
     }
 
     private fun drawMedia(c: Canvas, b: Block, x0: Float, y0: Float, ia: Int) {

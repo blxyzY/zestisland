@@ -7,6 +7,9 @@ import android.media.session.MediaController
 import android.os.Handler
 import android.os.Looper
 
+/** Tombol aksi dari notifikasi (mis. Berhenti/Jeda pada stopwatch, Tolak/Akhiri pada telepon). */
+class IslandAction(val title: String, val intent: PendingIntent)
+
 enum class Kind(val priority: Int) { MEDIA(1), TIMER(2), CALL(3), ALERT(4), NOTICE(5) }
 
 class IslandItem(
@@ -30,6 +33,7 @@ class IslandItem(
     var glyph: String = ""                  // NOTICE: ring/silent/vibrate/charge/low/unlock
     var accent: Int = -1                    // NOTICE: warna ikon
     var level: Int = 0                      // NOTICE: persen baterai
+    var actions: List<IslandAction> = emptyList()
     var shownAt: Long = 0L                  // NOTICE: uptimeMillis saat muncul (untuk animasi)
     val hasTimer: Boolean get() = whenMs > 0L
 }

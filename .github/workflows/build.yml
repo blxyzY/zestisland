@@ -19,11 +19,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     permissions:
       contents: write   # dibutuhkan hanya untuk step Release
-    env:
-      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.parallel=true
 
     steps:
       - uses: actions/checkout@v4
@@ -45,24 +43,29 @@ jobs:
           gradle-version: 8.7
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      # Debug keystore bawaan runner berbeda tiap build, jadi APK baru tidak bisa
-      # menimpa yang lama (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Isi secret
-      # DEBUG_KEYSTORE_BASE64 supaya tanda tangan selalu sama:
-      #   base64 -w0 ~/.android/debug.keystore
-      - name: Pakai debug keystore tetap (opsional)
+      # Tanda tangani APK dengan kunci uji AOSP milik ROM (UN1CA), supaya tanda
+      # tangannya selalu sama di setiap build dan cocok dengan ROM kamu.
+      # Kunci ini publik (ada di repo UN1CA, dipin ke satu commit); AGP memakainya
+      # sebagai debug keystore (alias androiddebugkey, password android).
+      - name: Pakai kunci uji AOSP UN1CA sebagai debug keystore
         env:
-          KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+          UNICA_SHA: 0c2ea1d61ddc78ae8e6900787f9f9e7269b7b439
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
-            mkdir -p ~/.android
-            echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
-            echo "Debug keystore tetap dipakai."
-          else
-            echo "::notice::DEBUG_KEYSTORE_BASE64 belum diset, tanda tangan APK akan berubah tiap build."
-          fi
+          B=https://raw.githubusercontent.com/salvogiangri/UN1CA/$UNICA_SHA/security
+          mkdir -p ~/.android /tmp/k
+          curl -fsSL "$B/aosp_testkey.pk8"      -o /tmp/k/key.pk8
+          curl -fsSL "$B/aosp_testkey.x509.pem" -o /tmp/k/cert.pem
+          openssl pkcs8 -inform DER -nocrypt -in /tmp/k/key.pk8 -out /tmp/k/key.pem
+          openssl pkcs12 -export -inkey /tmp/k/key.pem -in /tmp/k/cert.pem \
+            -name androiddebugkey -out /tmp/k/debug.p12 -passout pass:android
+          rm -f ~/.android/debug.keystore
+          keytool -importkeystore -srckeystore /tmp/k/debug.p12 -srcstoretype PKCS12 \
+            -srcstorepass android -destkeystore ~/.android/debug.keystore \
+            -deststoretype PKCS12 -deststorepass android -alias androiddebugkey -noprompt
+          rm -rf /tmp/k
 
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace --console=plain --info
 
       - name: Siapkan nama APK
         id: apk
